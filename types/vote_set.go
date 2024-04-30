@@ -73,6 +73,9 @@ type VoteSet struct {
 	maj23         *BlockID               // First 2/3 majority seen
 	votesByBlock  map[string]*blockVotes // string(blockHash|blockParts) -> blockVotes
 	peerMaj23s    map[P2PID]BlockID      // Maj23 for each peer
+
+	allVotesByBlock map[string]*blockVotes // string(blockHash|blockParts) -> blockVotes, including conflicting ones
+	allMaj23s	  []BlockID			 // All 2/3 majority seen
 }
 
 // NewVoteSet instantiates all fields of a new vote set. This constructor requires
@@ -94,6 +97,9 @@ func NewVoteSet(chainID string, height int64, round int32,
 		maj23:         nil,
 		votesByBlock:  make(map[string]*blockVotes, valSet.Size()),
 		peerMaj23s:    make(map[P2PID]BlockID),
+
+		allVotesByBlock: make(map[string]*blockVotes, valSet.Size()),
+		allMaj23s: make([]BlockID, 0),
 	}
 }
 
@@ -280,6 +286,26 @@ func (voteSet *VoteSet) addVerifiedVote(
 		voteSet.sum += votingPower
 	}
 
+	quorum := voteSet.valSet.TotalVotingPower()*2/3 + 1
+
+	allVotesByBlock, ok := voteSet.allVotesByBlock[blockKey]
+
+	// Add to allVotesByBlock anyway whether conflicting or not
+	if !ok {
+		allVotesByBlock = newBlockVotes(false, voteSet.valSet.Size())
+		voteSet.allVotesByBlock[blockKey] = allVotesByBlock
+	}
+	
+	// Check if block exceeds 2/3 quorum and update allMaj23s
+	origSum := allVotesByBlock.sum
+
+	allVotesByBlock.addVerifiedVote(vote, votingPower)
+
+	// If we just crossed the quorum threshold and have 2/3 majority...
+	if origSum < quorum && quorum <= allVotesByBlock.sum {
+		voteSet.allMaj23s = append(voteSet.allMaj23s, vote.BlockID)
+	}
+
 	votesByBlock, ok := voteSet.votesByBlock[blockKey]
 	if ok {
 		if conflicting != nil && !votesByBlock.peerMaj23 {
@@ -302,8 +328,8 @@ func (voteSet *VoteSet) addVerifiedVote(
 	}
 
 	// Before adding to votesByBlock, see if we'll exceed quorum
-	origSum := votesByBlock.sum
-	quorum := voteSet.valSet.TotalVotingPower()*2/3 + 1
+	origSum = votesByBlock.sum
+	quorum = voteSet.valSet.TotalVotingPower()*2/3 + 1
 
 	// Add vote to votesByBlock
 	votesByBlock.addVerifiedVote(vote, votingPower)
@@ -479,6 +505,16 @@ func (voteSet *VoteSet) TwoThirdsMajority() (blockID BlockID, ok bool) {
 		return *voteSet.maj23, true
 	}
 	return BlockID{}, false
+}
+
+// Returns all block IDs that have +2/3 majority
+func (voteSet *VoteSet) AllTwoThirdsMajority() []BlockID {
+	if voteSet == nil {
+		return nil
+	}
+	voteSet.mtx.Lock()
+	defer voteSet.mtx.Unlock()
+	return voteSet.allMaj23s
 }
 
 //--------------------------------------------------------------------------------

@@ -1678,7 +1678,22 @@ func (cs *State) tryFinalizeCommit(height int64) {
 		return
 	}
 
-	cs.finalizeCommit(height)
+	// Wait for cs.Config.WaitBeforeCommit to pass before committing the block.
+	
+	if cs.config.EnableFreezingGadget {
+		go func() {
+			<-time.After(cs.config.WaitBeforeCommit)
+			commits := cs.Votes.AllHeightCommits()
+			if len(commits) > 1 {
+				cs.Logger.Error("Conflicting commits detected", "height", height, "commit 1", commits[0].Hash, "commit 2", commits[1].Hash)
+				panic("Conflicting commits detected! Stopping...")
+				// This stops the consensus state, which means it stops the node in the testnet.
+			}
+			cs.finalizeCommit(height)
+		}()
+	} else {
+		cs.finalizeCommit(height)
+	}
 }
 
 // Increment height and goto cstypes.RoundStepNewHeight
@@ -2112,6 +2127,7 @@ func (cs *State) addVote(vote *types.Vote, peerID p2p.ID) (added bool, err error
 		"cs_height", cs.Height,
 		"extLen", len(vote.Extension),
 		"extSigLen", len(vote.ExtensionSignature),
+		"block_id", vote.BlockID,
 	)
 
 	if vote.Height < cs.Height || (vote.Height == cs.Height && vote.Round < cs.Round) {
@@ -2311,6 +2327,7 @@ func (cs *State) addVote(vote *types.Vote, peerID p2p.ID) (added bool, err error
 			"height", vote.Height,
 			"round", vote.Round,
 			"validator", vote.ValidatorAddress.String(),
+			"block id", vote.BlockID,
 			"vote_timestamp", vote.Timestamp,
 			"data", precommits.LogString())
 

@@ -47,6 +47,8 @@ type Reactor struct {
 	rs       *cstypes.RoundState
 
 	Metrics *Metrics
+
+	RecentMessageHistory *MessageCache
 }
 
 type ReactorOption func(*Reactor)
@@ -59,6 +61,7 @@ func NewReactor(consensusState *State, waitSync bool, options ...ReactorOption) 
 		waitSync: waitSync,
 		rs:       consensusState.GetRoundState(),
 		Metrics:  NopMetrics(),
+		RecentMessageHistory: NewMessageCache(10 * time.Second),
 	}
 	conR.BaseReactor = *p2p.NewBaseReactor("Consensus", conR)
 
@@ -240,13 +243,35 @@ func (conR *Reactor) Receive(e p2p.Envelope) {
 		return
 	}
 
+	// Unconditional gossip here
+	// How to avoid infinite gossip? Check if we have already received this message. Maintain a state of what messages we have seen so far.
+
+	// Expire old entried in the message cache once in a while. This has been implemented but the lifetime of the entries has been set to be large.
+	// Choose to gossip only consensus-critical messages that may not already be gossiped. In this case, we only need Precommit messages.
+	// Gossip after basic validation.
+
+	if conR.conS.config.EnableFreezingGadget {
+		switch msg := msg.(type) {
+			case *VoteMessage:
+				if !conR.RecentMessageHistory.AlreadySeen(msg) {
+					conR.Switch.Broadcast(e)
+					conR.RecentMessageHistory.Add(msg)
+				}
+		}
+	}
+
 	if err = msg.ValidateBasic(); err != nil {
 		conR.Logger.Error("Peer sent us invalid msg", "peer", e.Src, "msg", e.Message, "err", err)
 		conR.Switch.StopPeerForError(e.Src, err)
 		return
 	}
-
-	conR.Logger.Debug("Receive", "src", e.Src, "chId", e.ChannelID, "msg", msg)
+	// Don't log NewRoundStepMessage, it's too spammy
+	switch msg.(type) {
+		case *NewRoundStepMessage:
+		// Do nothing
+		default:
+			conR.Logger.Debug("Receive", "src", e.Src, "chId", e.ChannelID, "msg", msg)
+	}
 
 	// Get peer states
 	ps, ok := e.Src.Get(types.PeerStateKey).(*PeerState)
@@ -1813,3 +1838,59 @@ func (m *VoteSetBitsMessage) String() string {
 }
 
 //-------------------------------------
+
+
+type MessageCache struct {
+	mutex     sync.Mutex
+    messages  map[Message]time.Time
+    lifetime  time.Duration
+}
+
+// NewMessageCache creates a new MessageCache with a given lifetime for messages
+func NewMessageCache(lifetime time.Duration) *MessageCache {
+    cache := &MessageCache{
+        messages: make(map[Message]time.Time),
+        lifetime: lifetime,
+    }
+    go cache.manageExpiration()
+    return cache
+}
+
+// Add a new message to the cache
+func (c *MessageCache) Add(message Message) {
+    c.mutex.Lock()
+    defer c.mutex.Unlock()
+    c.messages[message] = time.Now()
+}
+
+// AlreadySeen checks if a message is in the cache and not expired
+func (c *MessageCache) AlreadySeen(message Message) bool {
+    c.mutex.Lock()
+    defer c.mutex.Unlock()
+    timestamp, exists := c.messages[message]
+    if !exists {
+        return false
+    }
+    return time.Since(timestamp) <= c.lifetime
+}
+
+// manageExpiration runs in the background to remove expired entries
+func (c *MessageCache) manageExpiration() {
+    ticker := time.NewTicker(c.lifetime)
+    for {
+        <-ticker.C
+        c.expireOldEntries()
+    }
+}
+
+// expireOldEntries removes expired entries from the cache
+func (c *MessageCache) expireOldEntries() {
+    c.mutex.Lock()
+    defer c.mutex.Unlock()
+    now := time.Now()
+    for message, timestamp := range c.messages {
+        if now.Sub(timestamp) > c.lifetime {
+            delete(c.messages, message)
+        }
+    }
+}
