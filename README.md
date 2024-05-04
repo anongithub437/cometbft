@@ -1,3 +1,11 @@
+The branch `ccs2024b-paper1976` contains the implementation for submission #1976 in CCS 2024B.
+
+This fork of CometBFT implements a freezing gadget to prevent two nodes from finalizing conflicting blocks at the same height, i.e., prevents safety violations. It does so by gossiping all precommit messages, waiting before finalizing a commit, and stopping finalizing if conflicts are detected.
+
+This fork also implements a recovery gadget which recovers liveness of the protocol without losing safety, once the validator set is reconfigured externally to restore honest supermajority.
+
+This is a prototype implementation and is NOT production-ready! 
+
 # CometBFT
 
 [Byzantine-Fault Tolerant][bft] [State Machine Replication][smr]. Or
